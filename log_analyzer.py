@@ -61,6 +61,11 @@ log_format = ('$remote_addr', '$remote_user', '$http_x_real_ip', '$time_local', 
               '$status', '$body_bytes_sent', '$http_referer', '$http_user_agent', "$http_x_forwarded_for",
               '$http_X_REQUEST_ID', '$http_X_RB_USER', '$request_time')
 
+config = get_config(config)
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+logging.basicConfig(format=LOGGING_FORMAT, datefmt='%Y.%m.%d %H:%M:%S', level=LOGGING_LEVEL,
+                            filename=config['LOGGING_FILE'])
 
 def get_date_from_logname(logname: str) -> datetime:
     logname = os.path.splitext(logname)[0]
@@ -102,8 +107,11 @@ def parse(line: bytes) -> dict:
 def get_url_time(parsed: dict) -> tuple:
     if parsed['$request'] == '0':
         return 'unparsed', 0.
-    method, url, http = parsed['$request'].split()
-    request_time = float(parsed['$request_time'])
+    try:
+        method, url, http = parsed['$request'].split()
+        request_time = float(parsed['$request_time'])
+    except Exception:
+        return 'unparsed', 0
     return url, request_time
 
 
@@ -119,7 +127,7 @@ def parse_lines(f) -> tuple:
     словарь url: список request time"""
     urls_counts = defaultdict(lambda: 0)
     urls_times = defaultdict(list)
-    print("Parsing lines... ", end="")
+    logging.info("Parsing lines... ")
     for line in f:
         record = parse(line)
         url, request_time = get_url_time(record)
@@ -140,20 +148,22 @@ def get_filename(log_dir: str, report_dir: str) -> str:
 
 
 def get_statistic(url_counts:dict, url_times:dict, report_size:int) -> list:
-    print('Count sum time')
+    logging.info('Count url sum time')
     url_sum_time = {url: sum(times) for url, times in url_times.items()}
     main_statistic = dict()
-    print('Count all requests count')
+    logging.info('Count all requests count')
     main_statistic['all_requests_count'] = sum(url_counts.values())
     unparsed_count = url_counts['unparsed']
-    unparsed_perc = main_statistic['all_requests_count'] / unparsed_count
+    logging.info(f"Unparsed: {url_counts['unparsed']} items.")
+    unparsed_perc =  unparsed_count / main_statistic['all_requests_count']
+    logging.info(f"Unparsed part: {unparsed_perc}")
     if unparsed_perc > 0.5:
-        logging.warning('Unparsed percent > 0.5, exiting.')
+        logging.warning('Unparsed part > 0.5, exiting.')
         sys.exit(1)
-    print('Count sum time')
+    logging.info('Count all sum time')
     main_statistic['sum_time'] = sum(url_sum_time.values())
     statistic = []
-    print('Count statistic')
+    logging.info('Count statistic')
     for url in url_counts:
         # count ‐ сколько раз встречается URL, абсолютное значение
         count = url_counts[url]
@@ -180,8 +190,8 @@ def get_statistic(url_counts:dict, url_times:dict, report_size:int) -> list:
             'time_max': round(time_max, 3),
             'time_med': round(time_med, 3),
         })
-    print('len:', len(statistic))
-    print('sorting...')
+    logging.info(f'len statistics: {len(statistic)}')
+    logging.info('sorting...')
     statistic.sort(key=itemgetter('time_sum'), reverse=True)
     statistic = statistic[:report_size]
     return statistic
@@ -204,16 +214,14 @@ def create_ts_file(ts_file: str) -> None:
         f.write(ts)
 
 
-def main(module_config: dict) -> None:
-    config = get_config(module_config)
-    logging.basicConfig(format=LOGGING_FORMAT, datefmt='%Y.%m.%d %H:%M:%S', level=LOGGING_LEVEL,
-                        filename=config["LOGGING_FILE"])
+def main() -> None:
     logging.info('Get filename')
     filename = get_filename(config["LOG_DIR"], config["REPORT_DIR"])
-    if not filename: return
+    if not filename:
+        logging.info('Last report is already generated, exiting')
+        return
     logging.info('Count urls')
     urls_counts, urls_times = parse_file(os.path.join(config["LOG_DIR"], filename))
-    logging.info(f'Unparsed: {unparsed_count} items.')
     logging.info('Count stats')
     statistic = get_statistic(urls_counts, urls_times, config['REPORT_SIZE'])
     logging.info('Rendering')
@@ -225,28 +233,6 @@ def main(module_config: dict) -> None:
 
 if __name__ == "__main__":
     try:
-        main(config)
+        main()
     except Exception as e:
         logging.exception(e)
-
-"""1. скрипт должен писать логи через библиотеку logging в формате '[%(asctime)s] %(levelname).1s %
-(message)s' c датой в виде '%Y.%m.%d %H:%M:%S' (logging.basicConfig позволит настроить это в одну строчку).
-Допускается только использование уровней info , error и exception . Путь до логфайла указывается в
-конфиге, если не указан, лог должен писаться в stdout (параметр filename в logging.basicConfig может
-принимать значение None как раз для этого).
-2. по окончнию (успешному) работы, скрипт создает (обновляет) ts‐файл по пути, заданному в конфиге
-(например /var/tmp/log_nalyzer.ts по умолчанию). Внутри файлика находится timestamp времени окончания
-работы, mtime файлика должен быть равен этому таймстемпу.
-
-
-3. все возможные "неожиданные" ошибки должны попадать в лог вместе с трейсбеком (посмотрите на
-logging.exception). Имеются в виду ошибки непредусмотренные логикой работы, приводящие к остановке
-обработки и выходу: баги, нажатие ctrl+C, кончилось место на диске и т.п.
-4. должно быть предусмотрено оповещение о том, что большую часть анализируемого лога не удалось
-распарсить (например, потому что сменился формат логирования). Для этого нужно задаться относительным
-(в долях/процентах) порогом ошибок парсинга и при его превышании писать в лог, затем выходить.
-Тестирование:
-1. на скрипт должны быть написаны тесты с использованием библиотеки unittest
-(https://pymotw.com/2/unittest/). Имя скрипта с тестами должно начинаться со слова test . Тестируемые кейсы
-и структура тестов определяется самостоятельно.
-"""
