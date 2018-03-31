@@ -1,7 +1,7 @@
 # otuspy-log-analyzer
-Log analyzer for otus python education course
-log files in ```log/``` folder
-reports in ```report``` folder
+Log analyzer for otus python education course.
+Log files search in ```log/``` folder
+Reports store in ```report``` folder
 
-just run ```python log_analyzer.py```  
+Just run ```python log_analyzer.py```
 and ```python tests.py``` for tests
