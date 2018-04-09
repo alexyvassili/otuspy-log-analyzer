@@ -11,7 +11,6 @@ import numpy as np
 import json
 import os
 import sys
-from dateutil.parser import parse as parsedate
 from collections import defaultdict
 from operator import itemgetter
 import logging
@@ -31,14 +30,14 @@ config = {
 }
 
 
-def createParser() -> argparse.ArgumentParser:
+def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', default='config.json')
     return parser
 
 
 def get_config(module_config: dict) -> dict:
-    parser = createParser()
+    parser = create_parser()
     namespace = parser.parse_args()
     config_file = namespace.config
     if not os.path.exists(config_file):
@@ -61,23 +60,13 @@ log_format = ('$remote_addr', '$remote_user', '$http_x_real_ip', '$time_local', 
               '$status', '$body_bytes_sent', '$http_referer', '$http_user_agent', "$http_x_forwarded_for",
               '$http_X_REQUEST_ID', '$http_X_RB_USER', '$request_time')
 
-config = get_config(config)
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-logging.basicConfig(format=LOGGING_FORMAT, datefmt='%Y.%m.%d %H:%M:%S', level=LOGGING_LEVEL,
-                            filename=config['LOGGING_FILE'])
 
-def get_date_from_logname(logname: str) -> datetime:
-    logname = os.path.splitext(logname)[0]
-    logname = logname.split('-')
-    date = logname[-1]
-    date = parsedate(date)
-    return date
+def get_file_date(entry: os.DirEntry) -> datetime.date:
+    return datetime.fromtimestamp(entry.stat().st_mtime).date()
 
 
-def get_reportfile_name(logname: str, prefix='report') -> str:
-    date = get_date_from_logname(logname)
-    datestr = date.strftime('%Y.%m.%d')
+def get_reportfile_name(file_date: datetime.date, prefix='report') -> str:
+    datestr = file_date.strftime('%Y.%m.%d')
     return f"{prefix}-{datestr}.html"
 
 
@@ -116,9 +105,9 @@ def get_url_time(parsed: dict) -> tuple:
 
 
 def parse_file(filename: str) -> tuple:
-    f = gzip.open(filename, 'rb') if filename.endswith('.gz') else open(filename, 'rb')
-    urls_counts, urls_times = parse_lines(f)
-    f.close()
+    open_func = gzip.open if filename.endswith('.gz') else open
+    with open_func(filename, 'rb') as f:
+        urls_counts, urls_times = parse_lines(f)
     return urls_counts, urls_times
 
 
@@ -136,15 +125,23 @@ def parse_lines(f) -> tuple:
     return urls_counts, urls_times
 
 
-def get_filename(log_dir: str, report_dir: str) -> str:
-    logs = [e.name for e in os.scandir(log_dir) if e.is_file() and 'nginx-access-ui' in e.name]
-    if not logs: return ''
-    reports = [e.name for e in os.scandir(report_dir) if e.is_file() and not e.name.startswith('.')]
-    reports_dates = [get_date_from_logname(report) for report in reports]
-    logs.sort(key=get_date_from_logname)
-    logname = logs[-1]
-    is_report_generated = get_date_from_logname(logname) in reports_dates
-    return '' if is_report_generated else logname
+def _get_timestamp(entry: os.DirEntry) -> datetime:
+    return datetime.fromtimestamp(entry.stat().st_mtime)
+
+
+def _get_date_from_mtime(entry: os.DirEntry) -> datetime.date:
+    return _get_timestamp(entry).date()
+
+
+def get_filename(log_dir: str, report_dir: str) -> os.DirEntry:
+    logs = [e for e in os.scandir(log_dir) if e.is_file() and 'nginx-access-ui' in e.name]
+    if not logs: return None
+    reports = [e for e in os.scandir(report_dir) if e.is_file() and e.name.endswith('.html')]
+    reports_dates = [get_file_date(report) for report in reports]
+    logs.sort(key=_get_timestamp, reverse=True)
+    log_entry = logs[0]
+    is_report_generated = get_file_date(log_entry) in reports_dates
+    return None if is_report_generated else log_entry
 
 
 def get_statistic(url_counts:dict, url_times:dict, report_size:int) -> list:
@@ -214,18 +211,20 @@ def create_ts_file(ts_file: str) -> None:
         f.write(ts)
 
 
-def main() -> None:
+def main(config) -> None:
     logging.info('Get filename')
-    filename = get_filename(config["LOG_DIR"], config["REPORT_DIR"])
-    if not filename:
+    file_entry = get_filename(config["LOG_DIR"], config["REPORT_DIR"])
+    if not file_entry:
         logging.info('Last report is already generated, exiting')
         return
+    filename = file_entry.name
+    file_date = get_file_date(file_entry)
     logging.info('Count urls')
     urls_counts, urls_times = parse_file(os.path.join(config["LOG_DIR"], filename))
     logging.info('Count stats')
     statistic = get_statistic(urls_counts, urls_times, config['REPORT_SIZE'])
     logging.info('Rendering')
-    report_file = os.path.join(config["REPORT_DIR"], get_reportfile_name(filename))
+    report_file = os.path.join(config["REPORT_DIR"], get_reportfile_name(file_date))
     logging.info(f"Save to: {report_file}")
     render_report(statistic, report_file)
     create_ts_file(config["TS_FILE"])
@@ -233,6 +232,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     try:
-        main()
+        config = get_config(config)
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        logging.basicConfig(format=LOGGING_FORMAT, datefmt='%Y.%m.%d %H:%M:%S', level=LOGGING_LEVEL,
+                            filename=config['LOGGING_FILE'])
+        main(config)
     except Exception as e:
         logging.exception(e)
